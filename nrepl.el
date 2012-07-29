@@ -722,25 +722,6 @@ DIRECTION is 'forward' or 'backward' (in the history list)."
 (defvar nrepl-mode-syntax-table
   (copy-syntax-table clojure-mode-syntax-table))
 
-(defvar nrepl-interaction-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map clojure-mode-map)
-    (define-key map (kbd "M-.") 'nrepl-jump)
-    (define-key map (kbd "M-,") 'nrepl-jump-back)
-    (define-key map (kbd "M-TAB") 'nrepl-complete)
-    (define-key map (kbd "C-M-x") 'nrepl-eval-expression-at-point)
-    (define-key map (kbd "C-x C-e") 'nrepl-eval-last-expression)
-    (define-key map (kbd "C-c C-e") 'nrepl-eval-last-expression)
-    (define-key map (kbd "C-c C-r") 'nrepl-eval-region)
-    (define-key map (kbd "C-c C-m") 'nrepl-macroexpand-1-last-expression)
-    (define-key map (kbd "C-c M-m") 'nrepl-macroexpand-all-last-expression)
-    (define-key map (kbd "C-c M-n") 'nrepl-set-ns)
-    (define-key map (kbd "C-c C-d") 'nrepl-doc)
-    (define-key map (kbd "C-c C-z") 'nrepl-switch-to-repl-buffer)
-    (define-key map (kbd "C-c C-k") 'nrepl-load-current-buffer)
-    (define-key map (kbd "C-c C-l") 'nrepl-load-file)
-    map))
-
 (defvar nrepl-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map clojure-mode-map)
@@ -759,6 +740,7 @@ DIRECTION is 'forward' or 'backward' (in the history list)."
     (define-key map (kbd "M-p") 'nrepl-previous-input)
     (define-key map (kbd "M-n") 'nrepl-next-input)
     (define-key map (kbd "C-c C-b") 'nrepl-interrupt)
+    (define-key map (kbd "SPC") 'nrepl-space)
     map))
 
 (defun nrepl-mode ()
@@ -791,7 +773,8 @@ DIRECTION is 'forward' or 'backward' (in the history list)."
   (define-key map (kbd "C-c C-z") 'nrepl-switch-to-repl-buffer)
   (define-key map (kbd "C-c C-k") 'nrepl-load-current-buffer)
   (define-key map (kbd "C-c C-l") 'nrepl-load-file)
-  (define-key map (kbd "C-c C-b") 'nrepl-interrupt))
+  (define-key map (kbd "C-c C-b") 'nrepl-interrupt)
+  (define-key map (kbd "SPC") 'nrepl-space))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.clj\\'" . clojure-nrepl-mode))
@@ -1313,6 +1296,68 @@ under point, prompts for a var."
   (let ((pending-request-ids (nrepl-hash-keys nrepl-requests)))
     (dolist (request-id pending-request-ids)
       (nrepl-send-interrupt request-id (nrepl-interrupt-handler (current-buffer))))))
+
+;;; arglist
+(defun nrepl-busy-p ()
+  "Returns true iff there are pending nREPL requests."
+  (> 0 (hash-table-count nrepl-requests)))
+
+(defun nrepl-current-connection ()
+  (get-process "nrepl"))
+
+(defun nrepl-allow-background-activities-p ()
+  (and (let ((conn (nrepl-current-connection)))
+         (and conn
+              (eq (process-status conn) 'open)))
+       (not (nrepl-busy-p))))
+
+(defun nrepl-space (n)
+  "Insert a space and print some relevant information (function arglist).
+Designed to be bound to the SPC key.  Prefix argument can be used to insert
+more than one space."
+  (interactive "p")
+  (self-insert-command n)
+  (when (nrepl-allow-background-activities-p)
+    (nrepl-echo-arglist)))
+
+(put 'nrepl-space 'delete-selection t) ; for delete-selection-mode & CUA
+
+(defun nrepl-operator-before-point ()
+  (ignore-errors 
+    (save-excursion
+      (backward-up-list 1)
+      (down-list 1)
+      (nrepl-symbol-at-point))))
+
+; TODO: convert to use backquote like nrepl-ido-form, elisp is
+; escaping the ? in symbol?/keyword?
+(defun nrepl-arglist-form (op ns)
+  (format "(try
+                (let [f (read-string \"%s\")]
+                  (cond
+                   (keyword? f) \"([map])\"
+                   (symbol? f) (let [var (ns-resolve (symbol \"%s\") f)]
+                                   (if-let [args (and var (:arglists (meta var)))]
+                                           args
+                                           nil))
+                   :else nil))
+                (catch Throwable t nil))" op ns))
+
+(defun nrepl-echo-arglist-handler (buffer)
+  (nrepl-make-response-handler buffer
+                               (lambda (buffer value)
+                                 (if (not (string= "nil" value))
+                                     (message (format "%s" value))))
+                               nil nil nil))
+
+(defun nrepl-echo-arglist ()
+  (let ((op (nrepl-operator-before-point)))
+    (when op
+      (nrepl-send-string
+       (nrepl-arglist-form op nrepl-buffer-ns)
+       nrepl-buffer-ns
+       (nrepl-echo-arglist-handler (current-buffer))))))
+
 
 ;;; server
 (defun nrepl-server-filter (process output)
